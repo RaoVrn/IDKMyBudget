@@ -1,9 +1,15 @@
 import { useState, useEffect } from "react";
 import ExpenseForm from "./ExpenseForm";
 import ExpenseList from "./ExpenseList";
+import IncomeForm from "./IncomeForm";
+import IncomeList from "./IncomeList";
+import BudgetForm from "./BudgetForm";
+import BudgetStatus from "./BudgetStatus";
 import expenseService from "../services/expenseService";
+import incomeService from "../services/incomeService";
+import budgetService from "../services/budgetService";
 import { toast } from "react-toastify";
-import { Card, CardBody, Typography, Spinner } from "@material-tailwind/react";
+import { Card, CardBody, Typography, Spinner, Tabs, TabsHeader, Tab } from "@material-tailwind/react";
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement } from 'chart.js';
 import { Doughnut, Bar } from 'react-chartjs-2';
 
@@ -11,95 +17,154 @@ ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarEle
 
 function Dashboard() {
   const [expenses, setExpenses] = useState([]);
+  const [incomes, setIncomes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [editingBudget, setEditingBudget] = useState(null);
+  const [activeTab, setActiveTab] = useState("overview"); // overview, income, expenses, budgets
   const [stats, setStats] = useState({
-    total: 0,
-    avgPerDay: 0,
-    categoryTotals: {},
+    totalIncome: 0,
+    totalExpenses: 0,
+    netIncome: 0,
+    monthlySavings: 0,
+    expensesByCategory: {},
+    incomeByCategory: {},
   });
 
-  // Calculate stats from expenses
-  const calculateStats = (expenses) => {
-    const total = expenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
-    const categoryTotals = expenses.reduce((acc, exp) => {
+  // Calculate stats from transactions
+  const calculateStats = (expenses, incomes) => {
+    const totalIncome = incomes.reduce((sum, inc) => sum + Number(inc.amount), 0);
+    const totalExpenses = expenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
+    
+    const expensesByCategory = expenses.reduce((acc, exp) => {
       acc[exp.category] = (acc[exp.category] || 0) + Number(exp.amount);
       return acc;
     }, {});
 
-    const dates = expenses.map(exp => new Date(exp.date));
-    const daysDiff = dates.length > 0 
-      ? (Math.max(...dates) - Math.min(...dates)) / (1000 * 60 * 60 * 24) + 1
-      : 1;
-    const avgPerDay = total / daysDiff;
+    const incomeByCategory = incomes.reduce((acc, inc) => {
+      acc[inc.category] = (acc[inc.category] || 0) + Number(inc.amount);
+      return acc;
+    }, {});
 
-    setStats({ total, avgPerDay, categoryTotals });
+    // Calculate monthly savings (use current month's data)
+    const now = new Date();
+    const currentMonthIncomes = incomes.filter(inc => {
+      const incDate = new Date(inc.date);
+      return incDate.getMonth() === now.getMonth() && 
+             incDate.getFullYear() === now.getFullYear();
+    });
+    const currentMonthExpenses = expenses.filter(exp => {
+      const expDate = new Date(exp.date);
+      return expDate.getMonth() === now.getMonth() && 
+             expDate.getFullYear() === now.getFullYear();
+    });
+
+    const monthlyIncome = currentMonthIncomes.reduce((sum, inc) => sum + Number(inc.amount), 0);
+    const monthlyExpenses = currentMonthExpenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
+    const monthlySavings = monthlyIncome - monthlyExpenses;
+
+    setStats({
+      totalIncome,
+      totalExpenses,
+      netIncome: totalIncome - totalExpenses,
+      monthlySavings,
+      expensesByCategory,
+      incomeByCategory,
+    });
   };
 
-  // Fetch all expenses
-  const fetchExpenses = async () => {
+  // Fetch all transactions
+  const fetchTransactions = async () => {
     setLoading(true);
     try {
-      const response = await expenseService.getExpenses();
-      if (response?.data) {
-        const sortedExpenses = response.data.sort((a, b) => 
-          new Date(b.date) - new Date(a.date)
-        );
-        setExpenses(sortedExpenses);
-        calculateStats(sortedExpenses);
-      }
+      const [expenseRes, incomeRes] = await Promise.all([
+        expenseService.getExpenses(),
+        incomeService.getIncomes()
+      ]);
+
+      const sortedExpenses = expenseRes.data.sort((a, b) => 
+        new Date(b.date) - new Date(a.date)
+      );
+      const sortedIncomes = incomeRes.data.sort((a, b) => 
+        new Date(b.date) - new Date(a.date)
+      );
+
+      setExpenses(sortedExpenses);
+      setIncomes(sortedIncomes);
+      calculateStats(sortedExpenses, sortedIncomes);
     } catch (error) {
-      console.error("Fetch expenses error:", error);
-      toast.error("Failed to fetch expenses. Please try refreshing the page.");
+      console.error("Fetch transactions error:", error);
+      toast.error("Failed to fetch transactions. Please try refreshing the page.");
     } finally {
       setLoading(false);
     }
   };
 
   // Handle expense deletion
-  const handleDelete = async (id) => {
+  const handleDeleteExpense = async (id) => {
     try {
       const result = await expenseService.deleteExpense(id);
       if (result.success) {
         const updatedExpenses = expenses.filter(exp => exp._id !== id);
         setExpenses(updatedExpenses);
-        calculateStats(updatedExpenses);
+        calculateStats(updatedExpenses, incomes);
         toast.success(result.message);
       }
     } catch (error) {
-      throw error; // Propagate error to ExpenseItem component for UI handling
+      throw error;
+    }
+  };
+
+  // Handle income deletion
+  const handleDeleteIncome = async (id) => {
+    try {
+      const result = await incomeService.deleteIncome(id);
+      if (result.success) {
+        const updatedIncomes = incomes.filter(inc => inc._id !== id);
+        setIncomes(updatedIncomes);
+        calculateStats(expenses, updatedIncomes);
+        toast.success(result.message);
+      }
+    } catch (error) {
+      throw error;
     }
   };
 
   useEffect(() => {
-    fetchExpenses();
+    fetchTransactions();
   }, []);
 
   // Chart configurations
-  const chartData = {
-    labels: Object.keys(stats.categoryTotals),
+  const expenseChartData = {
+    labels: Object.keys(stats.expensesByCategory),
     datasets: [{
-      data: Object.values(stats.categoryTotals),
+      data: Object.values(stats.expensesByCategory),
       backgroundColor: [
-        '#0EA5E9',
-        '#22C55E',
-        '#EF4444',
-        '#F59E0B',
-        '#8B5CF6',
-        '#EC4899',
-        '#06B6D4',
-        '#8B5CF6',
-        '#64748B',
+        '#EF4444', // red
+        '#F59E0B', // amber
+        '#10B981', // emerald
+        '#3B82F6', // blue
+        '#8B5CF6', // purple
+        '#EC4899', // pink
+        '#6366F1', // indigo
+        '#14B8A6', // teal
+        '#64748B', // blue-gray
       ],
     }],
   };
 
-  const barChartData = {
-    labels: Object.keys(stats.categoryTotals),
+  const incomeChartData = {
+    labels: Object.keys(stats.incomeByCategory),
     datasets: [{
-      data: Object.values(stats.categoryTotals),
-      backgroundColor: '#0EA5E9',
-      borderColor: '#0EA5E9',
-    }]
+      data: Object.values(stats.incomeByCategory),
+      backgroundColor: [
+        '#10B981', // emerald
+        '#3B82F6', // blue
+        '#8B5CF6', // purple
+        '#F59E0B', // amber
+        '#6366F1', // indigo
+        '#64748B', // blue-gray
+      ],
+    }],
   };
 
   if (loading) {
@@ -112,80 +177,181 @@ function Dashboard() {
 
   return (
     <div className="max-w-7xl mx-auto p-4">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+      {/* Overview Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+        <Card>
+          <CardBody>
+            <Typography variant="h6" color="blue-gray" className="mb-2">
+              Total Income
+            </Typography>
+            <Typography variant="h4" color="green" className="font-bold">
+              ₹{stats.totalIncome.toLocaleString()}
+            </Typography>
+          </CardBody>
+        </Card>
         <Card>
           <CardBody>
             <Typography variant="h6" color="blue-gray" className="mb-2">
               Total Expenses
             </Typography>
-            <Typography variant="h4" color="blue" className="font-bold">
-              ₹{stats.total.toLocaleString()}
+            <Typography variant="h4" color="red" className="font-bold">
+              ₹{stats.totalExpenses.toLocaleString()}
             </Typography>
           </CardBody>
         </Card>
         <Card>
           <CardBody>
             <Typography variant="h6" color="blue-gray" className="mb-2">
-              Average Daily Spend
+              Net Income
             </Typography>
-            <Typography variant="h4" color="blue" className="font-bold">
-              ₹{stats.avgPerDay.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            <Typography
+              variant="h4"
+              color={stats.netIncome >= 0 ? "green" : "red"}
+              className="font-bold"
+            >
+              ₹{stats.netIncome.toLocaleString()}
             </Typography>
           </CardBody>
         </Card>
         <Card>
           <CardBody>
             <Typography variant="h6" color="blue-gray" className="mb-2">
-              Number of Expenses
+              Monthly Savings
             </Typography>
-            <Typography variant="h4" color="blue" className="font-bold">
-              {expenses.length}
+            <Typography
+              variant="h4"
+              color={stats.monthlySavings >= 0 ? "green" : "red"}
+              className="font-bold"
+            >
+              ₹{stats.monthlySavings.toLocaleString()}
             </Typography>
           </CardBody>
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <Card>
-          <CardBody>
-            <Typography variant="h6" color="blue-gray" className="mb-4">
-              Expenses Distribution
-            </Typography>
-            <div className="h-[300px] flex justify-center">
-              <Doughnut data={chartData} options={{ maintainAspectRatio: false }} />
-            </div>
-          </CardBody>
-        </Card>
-        <Card>
-          <CardBody>
-            <Typography variant="h6" color="blue-gray" className="mb-4">
-              Category Breakdown
-            </Typography>
-            <div className="h-[300px]">
-              <Bar 
-                data={barChartData} 
-                options={{ 
-                  maintainAspectRatio: false,
-                  scales: {
-                    y: {
-                      beginAtZero: true
+      <Tabs value={activeTab} className="mb-6">
+        <TabsHeader>
+          <Tab value="overview" onClick={() => setActiveTab("overview")}>
+            Overview
+          </Tab>
+          <Tab value="income" onClick={() => setActiveTab("income")}>
+            Income
+          </Tab>
+          <Tab value="expenses" onClick={() => setActiveTab("expenses")}>
+            Expenses
+          </Tab>
+          <Tab value="budgets" onClick={() => setActiveTab("budgets")}>
+            Budgets
+          </Tab>
+        </TabsHeader>
+      </Tabs>
+
+      {activeTab === "overview" && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <Card>
+            <CardBody>
+              <Typography variant="h6" color="blue-gray" className="mb-4">
+                Income Distribution
+              </Typography>
+              <div className="h-[300px] flex justify-center">
+                <Doughnut
+                  data={incomeChartData}
+                  options={{ maintainAspectRatio: false }}
+                />
+              </div>
+            </CardBody>
+          </Card>
+          <Card>
+            <CardBody>
+              <Typography variant="h6" color="blue-gray" className="mb-4">
+                Expense Distribution
+              </Typography>
+              <div className="h-[300px] flex justify-center">
+                <Doughnut
+                  data={expenseChartData}
+                  options={{ maintainAspectRatio: false }}
+                />
+              </div>
+            </CardBody>
+          </Card>
+          <Card className="lg:col-span-2">
+            <CardBody>
+              <Typography variant="h6" color="blue-gray" className="mb-4">
+                Monthly Overview
+              </Typography>
+              <div className="h-[300px]">
+                <Bar
+                  data={{
+                    labels: ["Income", "Expenses", "Savings"],
+                    datasets: [{
+                      data: [stats.totalIncome, stats.totalExpenses, stats.monthlySavings],
+                      backgroundColor: ['#10B981', '#EF4444', '#3B82F6'],
+                    }],
+                  }}
+                  options={{
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true
+                      }
                     }
-                  }
-                }} 
-              />
-            </div>
-          </CardBody>
-        </Card>
-      </div>
+                  }}
+                />
+              </div>
+            </CardBody>
+          </Card>
+        </div>
+      )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
-          <ExpenseForm onExpenseAdded={fetchExpenses} />
+      {activeTab === "income" && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-1">
+            <IncomeForm onIncomeAdded={fetchTransactions} />
+          </div>
+          <div className="lg:col-span-2">
+            <IncomeList
+              incomes={incomes}
+              onDelete={handleDeleteIncome}
+              onRefresh={fetchTransactions}
+            />
+          </div>
         </div>
-        <div className="lg:col-span-2">
-          <ExpenseList expenses={expenses} onDelete={handleDelete} />
+      )}
+
+      {activeTab === "expenses" && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-1">
+            <ExpenseForm onExpenseAdded={fetchTransactions} />
+          </div>
+          <div className="lg:col-span-2">
+            <ExpenseList
+              expenses={expenses}
+              onDelete={handleDeleteExpense}
+            />
+          </div>
         </div>
-      </div>
+      )}
+
+      {activeTab === "budgets" && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-1">
+            <BudgetForm
+              onBudgetAdded={() => {
+                setEditingBudget(null);
+                fetchTransactions();
+              }}
+              editingBudget={editingBudget}
+              onCancelEdit={() => setEditingBudget(null)}
+            />
+          </div>
+          <div className="lg:col-span-2">
+            <BudgetStatus
+              onEdit={setEditingBudget}
+              onRefresh={fetchTransactions}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
